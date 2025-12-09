@@ -2,12 +2,12 @@
 Triton-based block-scaled matrix multiplication using Hopper Tensor Memory Accelerator (TMA).
 
 This module defines:
-- A persistent, autotuned Triton kernel `block_scaled_mm_kernel_tma_persistent` that multiplies
+- A persistent, (semi-autotuned) Triton kernel `block_scaled_mm_kernel_tma_persistent` that multiplies
   A[M,K] and B[K,N] with per-block scales Sa[M_blocks,K_blocks] and Sb[K_blocks,N_blocks],
   accumulating in fp32 and writing to C[M,N]. It uses device-side TMA descriptors to stream
   tiles from global memory efficiently and supports optional warp specialization and a
   sub-tile epilogue for improved store coalescing.
-- A Python wrapper `block_scaled_mm_tma` that validates inputs, prepares scales, and launches
+- A wrapper `block_scaled_mm_tma` that validates inputs, prepares scales, and launches
   the kernel with a persistent grid sized to the number of SMs.
 
 All dimensions must be divisible by their respective BLOCK_* sizes for the TMA path.
