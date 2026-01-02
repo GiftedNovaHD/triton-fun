@@ -11,4 +11,4 @@ JX learns and plays around with Triton!
  
 ### Stuff to try in future
 - Block-scaled matmul to take advantage of Blackwell's `tcgen05.mma` instruction
-- Other DSLs e.g. [cuTile Python](https://docs.nvidia.com/cuda/cutile-python/) once it is supported on Hopper
+- Other DSLs e.g. [cuTile Python](https://docs.nvidia.com/cuda/cutile-python/) once it is supported on Hopper, and TileLang
