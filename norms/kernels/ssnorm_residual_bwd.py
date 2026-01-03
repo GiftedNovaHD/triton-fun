@@ -33,14 +33,12 @@ def _ssnorm_residual_bwd(dx_ptr,
                      other = 0.0,
                      eviction_policy = "evict_first",
                      # cache_modifier = ".ca",
-                     # layout = tl.Layout.STRIDED,
                      ).to(tl.float32)
   dy = tl.load(dy_ptr + base + cols, 
                mask = mask,
                other = 0.0,
                eviction_policy = "evict_first",
                # cache_modifier = ".ca",
-               # layout = tl.Layout.STRIDED,
                ).to(tl.float32)
 
   inv_norm = tl.load(inv_norm_ptr + row).to(tl.float32)
@@ -69,7 +67,6 @@ def _ssnorm_residual_bwd(dx_ptr,
                             other = 0.0,
                             eviction_policy = "evict_first",
                             # cache_modifier = ".ca",
-                            # layout = tl.Layout.STRIDED,
                             ).to(tl.float32)
     dresidual = dresidual_out + dresidual_from_y
   else:
