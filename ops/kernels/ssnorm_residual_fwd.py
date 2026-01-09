@@ -34,7 +34,6 @@ def _ssnorm_residual_fwd(x_ptr,
               mask = mask, other = 0.0,
               eviction_policy = "evict_first",
               # cache_modifier = ".ca",
-              # layout = tl.Layout.STRIDED,
               ).to(tl.float32)
 
   if HAS_RESIDUAL_IN:
@@ -42,7 +41,6 @@ def _ssnorm_residual_fwd(x_ptr,
                 mask = mask, other = 0.0,
                 eviction_policy = "evict_first",
                 # cache_modifier = ".ca",
-                # layout = tl.Layout.STRIDED,
                 ).to(tl.float32)
     residual = x + r
   else:
