@@ -4,7 +4,7 @@ import triton
 import triton.testing
 
 from mamba_ssm.ops.triton.layer_norm import rms_norm_fn
-from norms.ssnorm import SSNormTriton
+from ops.ssnorm import SSNormTriton
 
 # Reference SSNorm (Torch)
 def ssnorm_ref(x, g, residual=None, prenorm=True, residual_in_fp32=False, eps=1e-6):
