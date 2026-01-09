@@ -12,13 +12,178 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import triton
+import triton.language as tl
 
 from torch import Tensor
 from typing import Optional
 
-from norms.kernels.ssnorm_residual_fwd import _ssnorm_residual_fwd
-from norms.kernels.ssnorm_residual_bwd import _ssnorm_residual_bwd
-from norms.kernels.ssnorm_reduce_buckets import _reduce_dg_buckets
+@triton.jit
+def _ssnorm_residual_fwd(x_ptr,
+                         residual_input_ptr, # May be dummy variable if HAS_RESIDUAL_IN is False
+                         y_ptr,
+                         residual_output_ptr, 
+                         inv_norm_ptr,
+                         gamma_ptr,
+                         row_stride,
+                         feature_dim,
+                         eps,
+                         scale,
+                         HAS_RESIDUAL_IN: tl.constexpr,
+                         BLOCK: tl.constexpr,
+                         ):
+  """
+  Fused forward pass for SSNorm with residual. Conceptually, the reference implementation computes
+  the residual, norm, denominator, output, (and optionally residual output) in multiple kernels. 
+
+  This version loads everything into registers/SRAM and fuses the residual addition, such that we
+  don't ever materialize an intermediate `x + residual` tensor via a separate kernel. Essentially,
+  a single kernel launch performs the residual, normalization, and scale all in SRAM/register. 
+  """
+  row = tl.program_id(0)
+  base = row * row_stride
+
+  cols = tl.arange(0, BLOCK)
+  mask = cols < feature_dim
+
+  # Load input (+ an optional residual) in FP32
+  x = tl.load(x_ptr + base + cols,
+              mask = mask, other = 0.0,
+              eviction_policy = "evict_first",
+              # cache_modifier = ".ca",
+              ).to(tl.float32)
+
+  if HAS_RESIDUAL_IN:
+    r = tl.load(residual_input_ptr + base + cols,
+                mask = mask, other = 0.0,
+                eviction_policy = "evict_first",
+                # cache_modifier = ".ca",
+                ).to(tl.float32)
+    residual = x + r
+  else:
+    residual = x
+  
+  # Save residual (in caller-chosen dtype: bf16/fp16 or fp32)
+  tl.store(residual_output_ptr + base + cols, residual, mask = mask)
+
+  # L2 norm + clamp
+  sum_of_squares = tl.sum(residual * residual, axis = 0)
+  norm = tl.sqrt(sum_of_squares)
+  denom = tl.maximum(norm, tl.full([], eps, tl.float32))
+  inv_norm = 1.0 / denom
+
+  tl.store(inv_norm_ptr + row, inv_norm)
+  
+  # Apply gamma
+  g = tl.load(gamma_ptr).to(tl.float32)
+  gamma = (g + 1.0) * scale
+
+  y = residual * inv_norm * gamma
+  tl.store(y_ptr + base + cols, y, mask = mask)
+
+@triton.jit
+def _ssnorm_residual_bwd(dx_ptr,
+                         dresidual_input_ptr,
+                         dgamma_partial_ptr,
+                         dy_ptr,
+                         dresidual_output_gradient_ptr,
+                         residual_output_ptr,
+                         inv_norm_ptr,
+                         g_ptr,
+                         row_stride,
+                         feature_dim,
+                         eps: tl.constexpr,
+                         scale,
+                         HAS_RESIDUAL_IN: tl.constexpr,
+                         HAS_DRESIDUAL_OUT: tl.constexpr,
+                         GROUP: tl.constexpr,
+                         BLOCK: tl.constexpr,
+                        ):
+  """
+  Fused backward pass for SSNorm with residual. 
+  """
+  row = tl.program_id(0)
+  base = row * row_stride
+
+  cols = tl.arange(0, BLOCK)
+  mask = cols < feature_dim
+
+  residual = tl.load(residual_output_ptr + base + cols,
+                     mask = mask, 
+                     other = 0.0,
+                     eviction_policy = "evict_first",
+                     # cache_modifier = ".ca",
+                     ).to(tl.float32)
+  dy = tl.load(dy_ptr + base + cols, 
+               mask = mask,
+               other = 0.0,
+               eviction_policy = "evict_first",
+               # cache_modifier = ".ca",
+               ).to(tl.float32)
+
+  inv_norm = tl.load(inv_norm_ptr + row).to(tl.float32)
+  denom = 1.0 / inv_norm
+
+  # gamma = sqrt(D) * (g + 1)
+  g = tl.load(g_ptr).to(tl.float32)
+  gamma = (g + 1.0) * scale
+
+  dot = tl.sum(dy * residual, axis = 0)
+
+  # Match F.normalize clamp:
+  is_clamped = denom <= tl.full([], eps, tl.float32)
+
+  inv2 = inv_norm * inv_norm
+  dresidual_from_y = tl.where(
+    is_clamped,
+    dy * gamma * inv_norm,
+    gamma * inv_norm * (dy - residual * (inv2 * dot)),
+  )
+
+  # Add upstream gradient from prenorm residual output if it exist
+  if HAS_DRESIDUAL_OUT:
+    dresidual_out = tl.load(dresidual_output_gradient_ptr + base + cols,
+                            mask = mask,
+                            other = 0.0,
+                            eviction_policy = "evict_first",
+                            # cache_modifier = ".ca",
+                            ).to(tl.float32)
+    dresidual = dresidual_out + dresidual_from_y
+  else:
+    dresidual = dresidual_from_y
+
+  # residual_out = x + residual_in => dx = dresidual, dresidual_in = dresidual
+  tl.store(dx_ptr + base + cols, dresidual, mask = mask)
+  if HAS_RESIDUAL_IN:
+    tl.store(dresidual_input_ptr + base + cols, dresidual, mask = mask)
+
+  # dg = d/dg [gamma] * sum(dy * residual * inv_norm)
+  # gamma = scale * (g + 1) => dgamma/dg = scale
+  dg_row = scale * (inv_norm * dot)
+
+  bucket = row % GROUP
+  tl.atomic_add(dgamma_partial_ptr + bucket, dg_row)
+
+@triton.jit
+def _reduce_dg_buckets(dg_partial_ptr,
+                       dg_output_ptr,
+                       num_buckets,
+                       BLOCK: tl.constexpr,
+                       ):
+  """
+  This is a reduction kernel that helps to sum `GROUP` number of partial scalars into a single scalar. 
+  We do this to avoid the problem of scalar atomic contention, that is, every row computing a
+  tl.atomic_add(dg_ptr, dg_row) which would mean tons of programs trying to access the same address, leading
+  to serialized atomics, and slow down the entire kernel as a result. 
+
+  1. Allocate GROUP buckets 
+  2. Each row will atomic_add into bucket = row % GROUP 
+  3. Computation is done in GROUP addresses. 
+  """
+  offset = tl.arange(0, BLOCK)
+  mask = offset < num_buckets
+  values = tl.load(dg_partial_ptr + offset, mask = mask, other = 0.0)
+  total = tl.sum(values, axis = 0)
+  tl.store(dg_output_ptr, total)
 
 class SSNorm(nn.Module):
   def __init__(self,
