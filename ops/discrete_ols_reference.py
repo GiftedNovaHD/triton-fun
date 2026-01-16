@@ -8,6 +8,8 @@ def lll_reduction_reference(B: Tensor,
   """
   LLL lattice basis reduction.
 
+  https://arxiv.org/abs/2410.22196
+
   Args:
     - `B` (`Tensor`): (`n`, `d`) tensor where `n` is the number of basis vectors and `d` is the dimension
     - `delta` (`float`): LLL parameter, typically in (0.25, 1). Default is 0.75
